@@ -6,10 +6,10 @@ const { canEdit, requireViewer } = require('../middleware/rbacMiddleware');
 const { updateEmail } = require('../controllers/personController');
 
 // Create a new person (admin and sub-admin only)
-router.post('/', auth, canEdit, personController.createPerson);
+router.post('/create-person', auth, canEdit, personController.createPerson);
 
 // Get all persons (all authenticated users)
-router.get('/', auth, requireViewer, personController.getAllPersons);
+router.get('/all-persons', auth, requireViewer, personController.getAllPersons);
 
 // Get eligible spouses for new form (admin and sub-admin only)
 router.get('/eligible-spouses', auth, canEdit, personController.getEligibleSpousesNewMember);
@@ -27,12 +27,12 @@ router.get('/eligible-parents', auth, canEdit, personController.getEligibleParen
 router.get('/family-tree', auth, requireViewer, personController.getFamilyTree);
 
 // Get single person (all authenticated users)
-router.get('/:id', auth, requireViewer, personController.getPerson);
+router.get('/get-person/:id', auth, requireViewer, personController.getPerson);
 
 // Update a person by ID (admin and sub-admin only)
-router.put('/:id', auth, canEdit, personController.updatePerson);
+router.put('/update-person/:id', auth, canEdit, personController.updatePerson);
 
 // Delete a person by ID (admin and sub-admin only)
-router.delete('/:id', auth, canEdit, personController.deletePerson);
+router.delete('/delete-person/:id', auth, canEdit, personController.deletePerson);
 
 module.exports = router; 

@@ -1,8 +1,11 @@
 const Person = require('../models/person');
 
-// Create a new person
+const mongoose = require('mongoose');
+
 exports.createPerson = async (req, res) => {
   try {
+    // console.log('form data sent to backend:', req.body);
+
     const {
       name,
       gender,
@@ -18,6 +21,10 @@ exports.createPerson = async (req, res) => {
       spouse_id = null
     } = req.body;
 
+    // Convert IDs to ObjectId to avoid type mismatch issues
+    const parentObjectIds = parent_ids.map(id => new mongoose.Types.ObjectId(id));
+    const spouseObjectId = spouse_id ? new mongoose.Types.ObjectId(spouse_id) : null;
+
     const personData = {
       name,
       gender,
@@ -28,42 +35,55 @@ exports.createPerson = async (req, res) => {
       countryCode: countryCode || '+91',
       occupation,
       photo,
-      parent_ids,
+      parent_ids: parentObjectIds,
       children_ids: [],
-      familyId: req.user.familyId // Add family ID from authenticated user
+      familyId: req.user.familyId
     };
 
     if (email && email.trim() !== '') {
       personData.email = email.trim();
     }
-    
-    if (spouse_id && spouse_id.trim() !== '') {
-      personData.spouse_id = spouse_id.trim();
+    if (spouseObjectId) {
+      personData.spouse_id = spouseObjectId;
     }
 
-    const person = new Person(personData);
-    const savedPerson = await person.save();
+    // Save new person
+    const savedPerson = await new Person(personData).save();
 
-    if (personData.spouse_id) {
+    // Update parents → add new child
+    if (parentObjectIds.length > 0) {
+      const parentUpdate = await Person.updateMany(
+        { _id: { $in: parentObjectIds }, familyId: req.user.familyId },
+        { $addToSet: { children_ids: savedPerson._id } }
+      );
+      // console.log(`Updated ${parentUpdate.modifiedCount} parents with child ID.`);
+
+      // Update child → add parents
+      const childUpdate = await Person.updateOne(
+        { _id: savedPerson._id },
+        { $addToSet: { parent_ids: { $each: parentObjectIds } } }
+      );
+      // console.log(`Updated ${childUpdate.modifiedCount} child with parent IDs.`);
+    }
+
+    // Update spouse relationship
+    if (spouseObjectId) {
       await Person.findOneAndUpdate(
-        { _id: personData.spouse_id, familyId: req.user.familyId },
+        { _id: spouseObjectId, familyId: req.user.familyId },
         { spouse_id: savedPerson._id }
       );
 
-      // --- NEW LOGIC: Merge children between spouses for consistency ---
-      const spouse = await Person.findOne({ _id: personData.spouse_id, familyId: req.user.familyId });
-      const spouseChildrenIds = (spouse && spouse.children_ids) ? spouse.children_ids.map(id => id.toString()) : [];
+      // Merge children between spouses
+      const spouse = await Person.findOne({ _id: spouseObjectId, familyId: req.user.familyId });
+      const spouseChildrenIds = (spouse?.children_ids || []).map(id => id.toString());
       const personChildrenIds = (savedPerson.children_ids || []).map(id => id.toString());
 
-      // Children present in spouse but not in person
       const spouseOnlyChildren = spouseChildrenIds.filter(id => !personChildrenIds.includes(id));
-      // Children present in person but not in spouse
       const personOnlyChildren = personChildrenIds.filter(id => !spouseChildrenIds.includes(id));
 
-      // For each spouse-only child, add to person's children_ids and add person as parent
       if (spouseOnlyChildren.length > 0) {
-        await Person.findOneAndUpdate(
-          { _id: savedPerson._id, familyId: req.user.familyId },
+        await Person.findByIdAndUpdate(
+          savedPerson._id,
           { $addToSet: { children_ids: { $each: spouseOnlyChildren } } }
         );
         await Person.updateMany(
@@ -71,10 +91,9 @@ exports.createPerson = async (req, res) => {
           { $addToSet: { parent_ids: savedPerson._id } }
         );
       }
-      // For each person-only child, add to spouse's children_ids and add spouse as parent
       if (personOnlyChildren.length > 0) {
-        await Person.findOneAndUpdate(
-          { _id: spouse._id, familyId: req.user.familyId },
+        await Person.findByIdAndUpdate(
+          spouse._id,
           { $addToSet: { children_ids: { $each: personOnlyChildren } } }
         );
         await Person.updateMany(
@@ -84,17 +103,11 @@ exports.createPerson = async (req, res) => {
       }
     }
 
-    if (parent_ids.length > 0) {
-      await Person.updateMany(
-        { _id: { $in: parent_ids }, familyId: req.user.familyId },
-        { $push: { children_ids: savedPerson._id } }
-      );
-    }
-
     res.status(201).json({
       success: true,
       data: savedPerson
     });
+
   } catch (error) {
     console.error('Error creating person:', error);
     res.status(500).json({
@@ -274,15 +287,18 @@ exports.getEligibleParents = async (req, res) => {
     twentyYearsAgo.setFullYear(twentyYearsAgo.getFullYear() - 20);
 
     // Query to get:
-    // 1. People with a spouse (spouse_id exists and is not null)
-    // 2. People without a spouse (spouse_id is null or doesn't exist) and over 20
     const people = await Person.find({
       familyId: req.user.familyId,
       $or: [
+        // Married people
         { spouse_id: { $exists: true, $ne: null } },
+    
+        // Single and at least 20 years old
         {
-          spouse_id: { $exists: false, $eq: null },
-          dateOfBirth: { $lte: twentyYearsAgo } // Born on or before 20 years ago
+          $and: [
+            { $or: [ { spouse_id: null }, { spouse_id: { $exists: false } } ] },
+            { dateOfBirth: { $lte: twentyYearsAgo } }
+          ]
         }
       ]
     }).select('name gender dateOfBirth spouse_id');
@@ -329,7 +345,7 @@ exports.getEligibleParents = async (req, res) => {
 // Get family tree (only trees containing the current user, identified by email)
 exports.getFamilyTree = async (req, res) => {
   try {
-    const depth = parseInt(req.query.depth) || 2;
+    const depth = parseInt(req.query.depth) || 3;
     const currentUserEmail = req.user.email; // Using email instead of _id
 
     if (!currentUserEmail) {
@@ -390,7 +406,9 @@ exports.getFamilyTree = async (req, res) => {
       return ancestors;
     }
 
-    const userAncestors = await findAncestors(currentUserPerson._id, depth);
+    // const userAncestors = await findAncestors(currentUserPerson._id, depth);
+    const currentUserId = currentUserPerson._id.toString();
+
 
     // Get all potential root persons (no parents) from the user's family
     const potentialRootPersons = await Person.find({ 
@@ -486,14 +504,23 @@ exports.getFamilyTree = async (req, res) => {
           
           while (queue.length > 0 && !containsUser) {
             const node = queue.shift();
-            if (userAncestors.has(node._id.toString())) {
+            // if (userAncestors.has(node._id.toString())) {
+            //   containsUser = true;
+            //   break;
+            // }
+            // if (node.spouse && userAncestors.has(node.spouse._id.toString())) {
+            //   containsUser = true;
+            //   break;
+            // }
+            if (node._id.toString() === currentUserId) {
               containsUser = true;
               break;
             }
-            if (node.spouse && userAncestors.has(node.spouse._id.toString())) {
+            if (node.spouse && node.spouse._id.toString() === currentUserId) {
               containsUser = true;
               break;
             }
+            
             if (node.children) {
               queue.push(...node.children);
             }
