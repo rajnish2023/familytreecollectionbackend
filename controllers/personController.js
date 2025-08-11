@@ -1,5 +1,108 @@
 const Person = require('../models/person');
 
+// Create a new person
+// exports.createPerson = async (req, res) => {
+//   try {
+//     const {
+//       name,
+//       gender,
+//       dateOfBirth,
+//       placeOfBirth,
+//       currentAddress,
+//       contactNumber,
+//       countryCode,
+//       email,
+//       occupation,
+//       photo,
+//       parent_ids,
+//       spouse_id = null
+//     } = req.body;
+
+//     const personData = {
+//       name,
+//       gender,
+//       dateOfBirth,
+//       placeOfBirth,
+//       currentAddress,
+//       contactNumber,
+//       countryCode: countryCode || '+91',
+//       occupation,
+//       photo,
+//       parent_ids: parent_ids || [],
+//       children_ids: [],
+//       familyId: req.user.familyId // Add family ID from authenticated user
+//     };
+
+//     if (email && email.trim() !== '') {
+//       personData.email = email.trim();
+//     }
+    
+//     if (spouse_id && spouse_id.trim() !== '') {
+//       personData.spouse_id = spouse_id.trim();
+//     }
+
+//     const person = new Person(personData);
+//     const savedPerson = await person.save();
+
+//     if (personData.spouse_id) {
+//       await Person.findOneAndUpdate(
+//         { _id: personData.spouse_id, familyId: req.user.familyId },
+//         { spouse_id: savedPerson._id }
+//       );
+
+//       // --- NEW LOGIC: Merge children between spouses for consistency ---
+//       const spouse = await Person.findOne({ _id: personData.spouse_id, familyId: req.user.familyId });
+//       const spouseChildrenIds = (spouse && spouse.children_ids) ? spouse.children_ids.map(id => id.toString()) : [];
+//       const personChildrenIds = (savedPerson.children_ids || []).map(id => id.toString());
+
+//       // Children present in spouse but not in person
+//       const spouseOnlyChildren = spouseChildrenIds.filter(id => !personChildrenIds.includes(id));
+//       // Children present in person but not in spouse
+//       const personOnlyChildren = personChildrenIds.filter(id => !spouseChildrenIds.includes(id));
+
+//       // For each spouse-only child, add to person's children_ids and add person as parent
+//       if (spouseOnlyChildren.length > 0) {
+//         await Person.findOneAndUpdate(
+//           { _id: savedPerson._id, familyId: req.user.familyId },
+//           { $addToSet: { children_ids: { $each: spouseOnlyChildren } } }
+//         );
+//         await Person.updateMany(
+//           { _id: { $in: spouseOnlyChildren }, familyId: req.user.familyId },
+//           { $addToSet: { parent_ids: savedPerson._id } }
+//         );
+//       }
+//       // For each person-only child, add to spouse's children_ids and add spouse as parent
+//       if (personOnlyChildren.length > 0) {
+//         await Person.findOneAndUpdate(
+//           { _id: spouse._id, familyId: req.user.familyId },
+//           { $addToSet: { children_ids: { $each: personOnlyChildren } } }
+//         );
+//         await Person.updateMany(
+//           { _id: { $in: personOnlyChildren }, familyId: req.user.familyId },
+//           { $addToSet: { parent_ids: spouse._id } }
+//         );
+//       }
+//     }
+
+//     if (parent_ids.length > 0) {
+//       await Person.updateMany(
+//         { _id: { $in: parent_ids }, familyId: req.user.familyId },
+//         { $push: { children_ids: savedPerson._id } }
+//       );
+//     }
+
+//     res.status(201).json({
+//       success: true,
+//       data: savedPerson
+//     });
+//   } catch (error) {
+//     console.error('Error creating person:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: error.message || 'Error creating person'
+//     });
+//   }
+// };
 const mongoose = require('mongoose');
 
 exports.createPerson = async (req, res) => {
@@ -590,6 +693,39 @@ exports.updatePerson = async (req, res) => {
       });
     }
 
+    // Sync name/email changes with User collection 
+    const User = require('../models/User'); // Make sure path is correct
+    let shouldUpdateUser = false;
+    const userUpdateFields = {};
+
+    // Handle email change
+    if (updateData.email && updateData.email.trim().toLowerCase() !== currentPerson.email) {
+      const newEmail = updateData.email.trim().toLowerCase();
+
+      // Check if another user already has this email
+      const existingUser = await User.findOne({ email: newEmail });
+      if (existingUser && existingUser.familyId.toString() !== req.user.familyId.toString()) {
+        return res.status(400).json({ success: false, message: 'Email already in use.' });
+      }
+      userUpdateFields.email = newEmail;
+      updateData.email = newEmail;
+      shouldUpdateUser = true;
+    }
+
+    // Handle name change
+    if (updateData.name && updateData.name !== currentPerson.name) {
+      userUpdateFields.name = updateData.name;
+      shouldUpdateUser = true;
+    }
+
+    // If this person is linked to a user, update them too
+    if (shouldUpdateUser) {
+      await User.updateOne(
+        { email: currentPerson.email, familyId: req.user.familyId },
+        { $set: userUpdateFields }
+      );
+    }
+
     // --- Handle parent_ids ---
     if ('parent_ids' in updateData) {
       // Remove this person from old parents' children_ids
@@ -686,7 +822,7 @@ exports.updatePerson = async (req, res) => {
           );
         }
 
-        // --- NEW LOGIC: Merge children between spouses for consistency ---
+        // Merge children between spouses for consistency
         // Fetch new spouse's children
         const newSpouse = await Person.findOne({ _id: newSpouseId, familyId: req.user.familyId });
         const spouseChildrenIds = (newSpouse && newSpouse.children_ids) ? newSpouse.children_ids.map(id => id.toString()) : [];

@@ -212,32 +212,47 @@ exports.changePassword = async (req, res) => {
 // @access  Private
 exports.changeEmail = async (req, res) => {
   try {
+    const Person = require('../models/person');
+
+    if (!req.user) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
     const userId = req.user._id;
-    const oldEmail = req.user.email;
-    const { email } = req.body;
+    const oldEmail = req.user.email?.trim().toLowerCase();
+    const email = req.body.email?.trim().toLowerCase();
+
+    // Validate email
     if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       return res.status(400).json({ message: 'Invalid email address.' });
     }
-    // Check if email is already taken
+
+    // Check if email already exists for another user
     const existing = await User.findOne({ email });
     if (existing && existing._id.toString() !== userId.toString()) {
       return res.status(400).json({ message: 'Email already in use.' });
     }
-    const user = await User.findById(userId);
+
+    // Update in User collection
+    const user = await User.findOne({ _id: userId, familyId: req.user.familyId });
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
     user.email = email;
     await user.save();
-    // Update the Person record with the old email (if exists)
-    const Person = require('../models/person');
-    const person = await Person.findOne({ email: oldEmail, familyId: user.familyId });
+
+    // Update in Person collection
+    const person = await Person.findOne({ email: oldEmail, familyId: req.user.familyId });
     if (person) {
       person.email = email;
       await person.save();
     }
+
     res.json({ message: 'Email updated successfully' });
+
   } catch (error) {
+    console.error('Error updating email:', error);
     res.status(500).json({ message: error.message || 'Error updating email' });
   }
 };
+
